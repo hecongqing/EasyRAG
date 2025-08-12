@@ -386,6 +386,60 @@ def qa_prompt(context: str, query: str) -> str:
     )
 
 
+def generate_answer(cfg: Dict[str, Any], prompt: str) -> str:
+    gen_conf = cfg.get("generation", {}) or {}
+    backend = gen_conf.get("backend", "none")
+    temperature = float(gen_conf.get("temperature", 0.2))
+    max_tokens = int(gen_conf.get("max_tokens", 1024))
+    top_p = float(gen_conf.get("top_p", 0.9))
+
+    if backend == "vllm":
+        try:
+            from openai import OpenAI
+            vconf = cfg.get("vllm", {}) or {}
+            base_url = vconf.get("base_url", "http://localhost:8000/v1")
+            api_key = vconf.get("api_key", "EMPTY")
+            model = vconf.get("model", cfg.get("llm_name", ""))
+            client = OpenAI(base_url=base_url, api_key=api_key)
+            resp = client.chat.completions.create(
+                model=model,
+                messages=[{"role": "user", "content": prompt}],
+                temperature=temperature,
+                top_p=top_p,
+                max_tokens=max_tokens,
+            )
+            return resp.choices[0].message.content
+        except Exception as e:
+            print(f"vLLM 调用失败: {e}")
+            return ""
+    elif backend == "ollama":
+        try:
+            import requests
+            oconf = cfg.get("ollama", {}) or {}
+            host = oconf.get("host", "http://localhost:11434")
+            model = oconf.get("model", "qwen2.5:7b-instruct")
+            data = {
+                "model": model,
+                "messages": [{"role": "user", "content": prompt}],
+                "stream": False,
+                "options": {
+                    "temperature": temperature,
+                    "top_p": top_p,
+                    "num_predict": max_tokens,
+                },
+            }
+            r = requests.post(f"{host}/api/chat", json=data, timeout=180)
+            r.raise_for_status()
+            j = r.json()
+            return (j.get("message", {}) or {}).get("content") or j.get("response", "") or ""
+        except Exception as e:
+            print(f"Ollama 调用失败: {e}")
+            return ""
+    else:
+        # 不生成，返回空字符串
+        return ""
+
+
 # ======== 教学主流程（索引与查询） ========
 
 def build_indices(config_path: str = "configs/es_milvus.yaml"):
@@ -421,28 +475,65 @@ def retrieve(query_obj: Dict[str, Any], config_path: str = "configs/es_milvus.ya
     # 精排：取前若干做 rerank
     rerank_topk = cfg["rerank_topk"]
     # 取候选的文本内容字段（ES 的 content；Milvus 只带路径，需要二次加载文本，教学简化：忽略仅 Milvus 但未在 ES 里的条目）
-    texts = [c["content"] for c in candidates if "content" in c]
-    texts = texts[:max(rerank_topk * 4, rerank_topk)]
+    contents = [c["content"] for c in candidates if "content" in c]
+    contents = contents[:max(rerank_topk * 4, rerank_topk)]
 
-    if not texts:
-        return {"answer": "不确定", "contexts": [], "nodes": []}
+    if not contents:
+        return {"answer": "不确定", "contexts": [], "nodes": [], "references": []}
 
     reranker = SimpleReranker(cfg["reranker_name"]) if os.path.exists(cfg["reranker_name"]) else SimpleReranker("BAAI/bge-small-zh-v1.5")
-    scores = reranker.score(query, texts)
-    pairs = list(zip(texts, scores))
+    scores = reranker.score(query, contents)
+    pairs = list(zip(contents, scores))
     pairs.sort(key=lambda x: x[1], reverse=True)
-    topk = [t for t, _ in pairs[:cfg["final_context_topk"]]]
+    selected_texts = [t for t, _ in pairs[:cfg["final_context_topk"]]]
 
-    # 组装提示
-    context = build_context(topk)
+    # 依据选中文本回填引用信息（file_path、know_path）
+    selected_items: List[Dict[str, Any]] = []
+    used_idx = set()
+    for txt in selected_texts:
+        found = False
+        for idx, item in enumerate(candidates):
+            if idx in used_idx:
+                continue
+            if item.get("content") == txt:
+                selected_items.append(item)
+                used_idx.add(idx)
+                found = True
+                break
+        if not found:
+            # 找不到来源时，构造一个占位
+            selected_items.append({"file_path": "", "know_path": "", "dir": "", "content": txt})
+
+    context = build_context([it.get("content", "") for it in selected_items])
     prompt = qa_prompt(context, query)
 
-    # 教学版：不集成在线 LLM，直接返回提示，实际调用由上层系统完成
+    # 生成答案（支持 vLLM / Ollama）
+    answer_text = generate_answer(cfg, prompt)
+
+    # 组织参考信息
+    references = []
+    seen_paths = set()
+    for it in selected_items:
+        fp = it.get("file_path", "")
+        kp = it.get("know_path", "")
+        if fp or kp:
+            key = fp or kp
+            if key in seen_paths:
+                continue
+            seen_paths.add(key)
+        references.append({
+            "file_path": fp,
+            "know_path": kp,
+            "dir": it.get("dir", ""),
+            "snippet": (it.get("content", "") or "")[:300],
+        })
+
     return {
         "prompt": prompt,
-        "contexts": topk,
+        "contexts": [it.get("content", "") for it in selected_items],
         "nodes": [],
-        "answer": "",  # 由上层 LLM 调用填写
+        "references": references,
+        "answer": answer_text or "",  # 若生成失败则为空串
     }
 
 

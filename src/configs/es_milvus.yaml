@@ -40,6 +40,27 @@ llm_name: "glm-4"
 # 组装上下文的模板：按照文档编号 0..5
 final_context_topk: 6
 
+# 生成配置
+# backend: none | vllm | ollama
+# 当 backend 为 none 时，仅返回 prompt 与 contexts
+# 使用 vLLM 时，请部署 OpenAI 兼容 API（如 vLLM OpenAI server）
+generation:
+  backend: none
+  temperature: 0.2
+  top_p: 0.9
+  max_tokens: 1024
+
+# vLLM OpenAI-兼容设置
+vllm:
+  base_url: "http://localhost:8000/v1"
+  api_key: "EMPTY"  # vLLM 可填任意
+  model: "qwen2.5-7b-instruct"
+
+# Ollama 设置
+ollama:
+  host: "http://localhost:11434"
+  model: "qwen2.5:7b-instruct"
+
 # ES 设置（BM25 使用 ES/Kibana 教学）
 elasticsearch:
   hosts: ["http://localhost:9200"]
