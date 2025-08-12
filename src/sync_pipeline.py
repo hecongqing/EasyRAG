@@ -386,6 +386,85 @@ def qa_prompt(context: str, query: str) -> str:
     )
 
 
+def generate_answer(cfg: Dict[str, Any], prompt: str) -> str:
+    """Generate final answer from prompt using configured LLM provider.
+    Supports OpenAI-compatible, ZhipuAI GLM, or local HuggingFace model when llm_name is a path.
+    """
+    llm_name = str(cfg.get("llm_name", "")).strip()
+
+    # Prefer explicit provider by model name; otherwise infer from available API keys
+    try:
+        # OpenAI-compatible
+        use_openai = (
+            llm_name.startswith("gpt-")
+            or llm_name.startswith("o")  # covers o1, o3 etc. if used
+            or os.getenv("OPENAI_API_KEY") is not None
+        )
+        if use_openai:
+            try:
+                from openai import OpenAI  # type: ignore
+                client = OpenAI()
+                resp = client.chat.completions.create(
+                    model=llm_name or "gpt-3.5-turbo",
+                    messages=[
+                        {"role": "system", "content": "你是专业的中文助理。严格依据提供的上下文回答。"},
+                        {"role": "user", "content": prompt},
+                    ],
+                    temperature=0.2,
+                )
+                return (resp.choices[0].message.content or "").strip()
+            except Exception:
+                pass
+
+        # ZhipuAI (GLM)
+        use_zhipu = ("glm" in llm_name.lower()) or (os.getenv("ZHIPUAI_API_KEY") is not None)
+        if use_zhipu:
+            try:
+                import zhipuai  # type: ignore
+                client = zhipuai.ZhipuAI(api_key=os.getenv("ZHIPUAI_API_KEY"))
+                resp = client.chat.completions.create(
+                    model=llm_name or "glm-4",
+                    messages=[
+                        {"role": "system", "content": "你是专业的中文助理。严格依据提供的上下文回答。"},
+                        {"role": "user", "content": prompt},
+                    ],
+                    temperature=0.2,
+                )
+                # zhipuai SDK returns dict-like message
+                msg = resp.choices[0].message
+                if isinstance(msg, dict):
+                    return str(msg.get("content", "")).strip()
+                # Fallback for possible object interface
+                return getattr(msg, "content", "").strip()
+            except Exception:
+                pass
+
+        # Local transformers fallback if llm_name is a local model path
+        if llm_name and os.path.exists(llm_name):
+            try:
+                from transformers import AutoTokenizer, AutoModelForCausalLM  # type: ignore
+                import torch  # ensure torch is available
+                tokenizer = AutoTokenizer.from_pretrained(llm_name)
+                model = AutoModelForCausalLM.from_pretrained(llm_name, torch_dtype=torch.float16 if torch.cuda.is_available() else None)
+                device = "cuda" if torch.cuda.is_available() else "cpu"
+                model = model.to(device)
+                inputs = tokenizer(prompt, return_tensors="pt").to(device)
+                output_ids = model.generate(
+                    **inputs,
+                    max_new_tokens=512,
+                    do_sample=False,
+                    eos_token_id=tokenizer.eos_token_id,
+                )
+                generated = output_ids[0][inputs["input_ids"].shape[1]:]
+                return tokenizer.decode(generated, skip_special_tokens=True).strip()
+            except Exception:
+                pass
+    except Exception:
+        pass
+
+    return ""
+
+
 # ======== 教学主流程（索引与查询） ========
 
 def build_indices(config_path: str = "configs/es_milvus.yaml"):
@@ -433,16 +512,16 @@ def retrieve(query_obj: Dict[str, Any], config_path: str = "configs/es_milvus.ya
     pairs.sort(key=lambda x: x[1], reverse=True)
     topk = [t for t, _ in pairs[:cfg["final_context_topk"]]]
 
-    # 组装提示
+    # 组装提示并生成答案
     context = build_context(topk)
     prompt = qa_prompt(context, query)
+    answer = generate_answer(cfg, prompt)
 
-    # 教学版：不集成在线 LLM，直接返回提示，实际调用由上层系统完成
     return {
         "prompt": prompt,
         "contexts": topk,
         "nodes": [],
-        "answer": "",  # 由上层 LLM 调用填写
+        "answer": answer,
     }
 
 
