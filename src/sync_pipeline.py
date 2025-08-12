@@ -388,16 +388,59 @@ def qa_prompt(context: str, query: str) -> str:
 
 def generate_answer(cfg: Dict[str, Any], prompt: str) -> str:
     """Generate final answer from prompt using configured LLM provider.
-    Supports OpenAI-compatible, ZhipuAI GLM, or local HuggingFace model when llm_name is a path.
+    Supports:
+    - vLLM (OpenAI-compatible) via cfg['llm_provider'] == 'vllm'
+    - Ollama (OpenAI-compatible) via cfg['llm_provider'] == 'ollama'
+    - OpenAI, ZhipuAI, or local transformers as fallbacks
     """
     llm_name = str(cfg.get("llm_name", "")).strip()
+    provider = str(cfg.get("llm_provider", "")).strip().lower()
+    temperature = float(cfg.get("temperature", 0.2))
 
-    # Prefer explicit provider by model name; otherwise infer from available API keys
+    # Provider: vLLM (OpenAI-compatible server)
+    if provider == "vllm":
+        base_url = cfg.get("vllm", {}).get("base_url", "http://localhost:8000/v1")
+        model = cfg.get("vllm", {}).get("model", llm_name or "")
+        try:
+            from openai import OpenAI  # type: ignore
+            client = OpenAI(base_url=base_url, api_key=os.getenv("OPENAI_API_KEY", "EMPTY"))
+            resp = client.chat.completions.create(
+                model=model,
+                messages=[
+                    {"role": "system", "content": "你是专业的中文助理。严格依据提供的上下文回答。"},
+                    {"role": "user", "content": prompt},
+                ],
+                temperature=temperature,
+            )
+            return (resp.choices[0].message.content or "").strip()
+        except Exception:
+            pass
+
+    # Provider: Ollama (OpenAI-compatible endpoint)
+    if provider == "ollama":
+        base_url = cfg.get("ollama", {}).get("base_url", "http://localhost:11434/v1")
+        model = cfg.get("ollama", {}).get("model", llm_name or "")
+        try:
+            from openai import OpenAI  # type: ignore
+            client = OpenAI(base_url=base_url, api_key=os.getenv("OLLAMA_API_KEY", "ollama"))
+            resp = client.chat.completions.create(
+                model=model,
+                messages=[
+                    {"role": "system", "content": "你是专业的中文助理。严格依据提供的上下文回答。"},
+                    {"role": "user", "content": prompt},
+                ],
+                temperature=temperature,
+            )
+            return (resp.choices[0].message.content or "").strip()
+        except Exception:
+            pass
+
+    # Fallbacks: OpenAI-compatible
     try:
         # OpenAI-compatible
         use_openai = (
             llm_name.startswith("gpt-")
-            or llm_name.startswith("o")  # covers o1, o3 etc. if used
+            or llm_name.startswith("o")
             or os.getenv("OPENAI_API_KEY") is not None
         )
         if use_openai:
@@ -410,7 +453,7 @@ def generate_answer(cfg: Dict[str, Any], prompt: str) -> str:
                         {"role": "system", "content": "你是专业的中文助理。严格依据提供的上下文回答。"},
                         {"role": "user", "content": prompt},
                     ],
-                    temperature=0.2,
+                    temperature=temperature,
                 )
                 return (resp.choices[0].message.content or "").strip()
             except Exception:
@@ -428,13 +471,11 @@ def generate_answer(cfg: Dict[str, Any], prompt: str) -> str:
                         {"role": "system", "content": "你是专业的中文助理。严格依据提供的上下文回答。"},
                         {"role": "user", "content": prompt},
                     ],
-                    temperature=0.2,
+                    temperature=temperature,
                 )
-                # zhipuai SDK returns dict-like message
                 msg = resp.choices[0].message
                 if isinstance(msg, dict):
                     return str(msg.get("content", "")).strip()
-                # Fallback for possible object interface
                 return getattr(msg, "content", "").strip()
             except Exception:
                 pass
@@ -443,9 +484,12 @@ def generate_answer(cfg: Dict[str, Any], prompt: str) -> str:
         if llm_name and os.path.exists(llm_name):
             try:
                 from transformers import AutoTokenizer, AutoModelForCausalLM  # type: ignore
-                import torch  # ensure torch is available
+                import torch
                 tokenizer = AutoTokenizer.from_pretrained(llm_name)
-                model = AutoModelForCausalLM.from_pretrained(llm_name, torch_dtype=torch.float16 if torch.cuda.is_available() else None)
+                model = AutoModelForCausalLM.from_pretrained(
+                    llm_name,
+                    torch_dtype=torch.float16 if torch.cuda.is_available() else None,
+                )
                 device = "cuda" if torch.cuda.is_available() else "cpu"
                 model = model.to(device)
                 inputs = tokenizer(prompt, return_tensors="pt").to(device)
