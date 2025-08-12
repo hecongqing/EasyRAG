@@ -1,0 +1,48 @@
+# 教学版同步 RAG 配置（不依赖 easyrag，不用 async）
+
+# 数据路径
+processed_data_dir: "../data/format_data_with_img"
+pathmap_path: "../data/format_data_with_img/pathmap.json"
+imgmap_path: "../data/imgmap_filtered.json"
+stopwords_path: "../data/hit_stopwords.txt"
+
+# 分块策略（预处理脚本已生成 .txt，每个文件内部仍按句子/段落分割以便 BM25 和向量一致）
+chunk_size: 1024
+chunk_overlap: 200
+
+# 稀疏检索（BM25）
+# 两路：文本块检索、知识路径检索
+bm25_topk_text: 192
+bm25_topk_path: 6
+
+# 密集检索（Milvus 向量库）
+# 向量模型：gte-Qwen2-7B-instruct（实际编码模块可替换为 GTE-large 等小模型以便教学）
+embed_model_name: "Alibaba-NLP/gte-Qwen2-7B-instruct"
+embed_dim: 3584
+milvus:
+  host: "localhost"
+  port: 19530
+  collection: "aiops24_chunks"
+  path_collection: "aiops24_paths"
+  index_type: "IVF_FLAT"
+  metric_type: "COSINE"
+  nlist: 1024
+
+# 检索融合与重排
+# 粗排融合：可选 simple 或 rrf
+coarse_fusion: "simple"  # simple | rrf
+# 精排（LLM Reranker）：bge-reranker-v2-minicpm-layerwise
+reranker_name: "../models/bge-reranker-v2-minicpm-layerwise"
+rerank_topk: 6
+
+# 最终问答
+llm_name: "glm-4"
+# 组装上下文的模板：按照文档编号 0..5
+final_context_topk: 6
+
+# ES 设置（BM25 使用 ES/Kibana 教学）
+elasticsearch:
+  hosts: ["http://localhost:9200"]
+  basic_auth: null  # ["user", "pass"] 如有需要
+  index_text: "aiops24_text_chunks"
+  index_path: "aiops24_know_paths"

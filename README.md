@@ -130,3 +130,84 @@ Thanks to the [CCF AIOps 2024 Challenge Organising Committee](https://competitio
 ## Star History
 
 ![Star History Chart](https://api.star-history.com/svg?repos=BUAADreamer/EasyRAG&type=Date)
+
+## 教学版：同步 ES + Milvus 索引与检索
+
+不依赖 `easyrag`，不使用 async。适合理解“两路稀疏 + 密集 + 精排 + 融合”的完整流程。
+
+### 0. 数据准备（官方脚本）
+
+```bash
+mkdir -p data
+
+# 下载官方数据
+git clone https://www.modelscope.cn/datasets/issaccv/aiops2024-challenge-dataset.git data
+cd data
+mkdir format_data_with_img
+cp ../src/data/imgmap_filtered.json format_data_with_img/
+mkdir origin_data
+
+# 解压
+unzip -q -O gb2312 director.zedx -d origin_data/director
+unzip -q -O utf-8 emsplus.zedx -d origin_data/emsplus
+unzip -q -O gb2312 rcp.zedx -d origin_data/rcp
+unzip -q -O utf-8 umac.zedx -d origin_data/umac
+mv origin_data/umac/documents/Namf_MP/zh-CN origin_data/umac/documents/Namf_MP/zh-cn
+cd ..
+
+# 预处理（生成 `data/format_data_with_img` 与 `pathmap.json`）
+cd src
+python preprocess_zedx.py
+cd ..
+```
+
+### 1. 启动 ES 与 Milvus
+
+- Elasticsearch 8.x，默认 `http://localhost:9200`。
+- Milvus 2.4+，默认 `localhost:19530`。
+
+如需修改，编辑 `src/configs/es_milvus.yaml`。
+
+### 2. 安装依赖
+
+```bash
+pip install -r requirements.txt
+```
+
+### 3. 构建索引
+
+```bash
+cd src
+python sync_pipeline.py index --config configs/es_milvus.yaml
+```
+
+- ES 两个索引：
+  - `aiops24_text_chunks`：分块文本（content/tokens + file_path/dir/know_path）
+  - `aiops24_know_paths`：知识路径（路径检索）
+- Milvus：`aiops24_chunks` 浮点向量集合
+
+### 4. 查询示例
+
+```bash
+cd src
+python - <<'PY'
+import json
+from sync_pipeline import retrieve
+q = {"id": 1, "query": "VNF 弹性分几类？", "document": "rcp"}
+res = retrieve(q, "configs/es_milvus.yaml")
+print(json.dumps(res, ensure_ascii=False, indent=2))
+PY
+```
+
+返回包含：
+- `prompt`：已拼装问答提示（含 top6 文本块）
+- `contexts`：精排后的文本块
+
+上层可用本地/在线 LLM（如 GLM-4）生成答案。
+
+### 教学要点对应
+- 稀疏检索（BM25）：基于 `jieba` 分词 + 停用词，ES 的 `content/tokens` 字段检索；同时提供“路径检索”。
+- 密集检索（Milvus）：GTE 模型编码；COSINE 匹配；返回 top288。
+- 融合：简单合并（默认）或 RRF（可切换）。
+- 精排：使用简化版 reranker（可替换为 `bge-reranker-v2-minicpm-layerwise`）。
+- 最终提示：与说明一致的模板，top6 文档拼接。
