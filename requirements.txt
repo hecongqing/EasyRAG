@@ -116,3 +116,5 @@ zhipuai
 fastapi==0.112.0
 uvicorn==0.30.5
 streamlit==1.37.1
+elasticsearch==8.13.1
+pymilvus==2.4.5
