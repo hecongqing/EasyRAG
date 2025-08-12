@@ -386,6 +386,129 @@ def qa_prompt(context: str, query: str) -> str:
     )
 
 
+def generate_answer(cfg: Dict[str, Any], prompt: str) -> str:
+    """Generate final answer from prompt using configured LLM provider.
+    Supports:
+    - vLLM (OpenAI-compatible) via cfg['llm_provider'] == 'vllm'
+    - Ollama (OpenAI-compatible) via cfg['llm_provider'] == 'ollama'
+    - OpenAI, ZhipuAI, or local transformers as fallbacks
+    """
+    llm_name = str(cfg.get("llm_name", "")).strip()
+    provider = str(cfg.get("llm_provider", "")).strip().lower()
+    temperature = float(cfg.get("temperature", 0.2))
+
+    # Provider: vLLM (OpenAI-compatible server)
+    if provider == "vllm":
+        base_url = cfg.get("vllm", {}).get("base_url", "http://localhost:8000/v1")
+        model = cfg.get("vllm", {}).get("model", llm_name or "")
+        try:
+            from openai import OpenAI  # type: ignore
+            client = OpenAI(base_url=base_url, api_key=os.getenv("OPENAI_API_KEY", "EMPTY"))
+            resp = client.chat.completions.create(
+                model=model,
+                messages=[
+                    {"role": "system", "content": "你是专业的中文助理。严格依据提供的上下文回答。"},
+                    {"role": "user", "content": prompt},
+                ],
+                temperature=temperature,
+            )
+            return (resp.choices[0].message.content or "").strip()
+        except Exception:
+            pass
+
+    # Provider: Ollama (OpenAI-compatible endpoint)
+    if provider == "ollama":
+        base_url = cfg.get("ollama", {}).get("base_url", "http://localhost:11434/v1")
+        model = cfg.get("ollama", {}).get("model", llm_name or "")
+        try:
+            from openai import OpenAI  # type: ignore
+            client = OpenAI(base_url=base_url, api_key=os.getenv("OLLAMA_API_KEY", "ollama"))
+            resp = client.chat.completions.create(
+                model=model,
+                messages=[
+                    {"role": "system", "content": "你是专业的中文助理。严格依据提供的上下文回答。"},
+                    {"role": "user", "content": prompt},
+                ],
+                temperature=temperature,
+            )
+            return (resp.choices[0].message.content or "").strip()
+        except Exception:
+            pass
+
+    # Fallbacks: OpenAI-compatible
+    try:
+        # OpenAI-compatible
+        use_openai = (
+            llm_name.startswith("gpt-")
+            or llm_name.startswith("o")
+            or os.getenv("OPENAI_API_KEY") is not None
+        )
+        if use_openai:
+            try:
+                from openai import OpenAI  # type: ignore
+                client = OpenAI()
+                resp = client.chat.completions.create(
+                    model=llm_name or "gpt-3.5-turbo",
+                    messages=[
+                        {"role": "system", "content": "你是专业的中文助理。严格依据提供的上下文回答。"},
+                        {"role": "user", "content": prompt},
+                    ],
+                    temperature=temperature,
+                )
+                return (resp.choices[0].message.content or "").strip()
+            except Exception:
+                pass
+
+        # ZhipuAI (GLM)
+        use_zhipu = ("glm" in llm_name.lower()) or (os.getenv("ZHIPUAI_API_KEY") is not None)
+        if use_zhipu:
+            try:
+                import zhipuai  # type: ignore
+                client = zhipuai.ZhipuAI(api_key=os.getenv("ZHIPUAI_API_KEY"))
+                resp = client.chat.completions.create(
+                    model=llm_name or "glm-4",
+                    messages=[
+                        {"role": "system", "content": "你是专业的中文助理。严格依据提供的上下文回答。"},
+                        {"role": "user", "content": prompt},
+                    ],
+                    temperature=temperature,
+                )
+                msg = resp.choices[0].message
+                if isinstance(msg, dict):
+                    return str(msg.get("content", "")).strip()
+                return getattr(msg, "content", "").strip()
+            except Exception:
+                pass
+
+        # Local transformers fallback if llm_name is a local model path
+        if llm_name and os.path.exists(llm_name):
+            try:
+                from transformers import AutoTokenizer, AutoModelForCausalLM  # type: ignore
+                import torch
+                tokenizer = AutoTokenizer.from_pretrained(llm_name)
+                model = AutoModelForCausalLM.from_pretrained(
+                    llm_name,
+                    torch_dtype=torch.float16 if torch.cuda.is_available() else None,
+                )
+                device = "cuda" if torch.cuda.is_available() else "cpu"
+                model = model.to(device)
+                inputs = tokenizer(prompt, return_tensors="pt").to(device)
+                output_ids = model.generate(
+                    **inputs,
+                    max_new_tokens=512,
+                    do_sample=False,
+                    eos_token_id=tokenizer.eos_token_id,
+                )
+                generated = output_ids[0][inputs["input_ids"].shape[1]:]
+                return tokenizer.decode(generated, skip_special_tokens=True).strip()
+            except Exception:
+                pass
+    except Exception:
+        pass
+
+    return ""
+
+
 # ======== 教学主流程（索引与查询） ========
 
 def build_indices(config_path: str = "configs/es_milvus.yaml"):
@@ -433,16 +556,16 @@ def retrieve(query_obj: Dict[str, Any], config_path: str = "configs/es_milvus.ya
     pairs.sort(key=lambda x: x[1], reverse=True)
     topk = [t for t, _ in pairs[:cfg["final_context_topk"]]]
 
-    # 组装提示
+    # 组装提示并生成答案
     context = build_context(topk)
     prompt = qa_prompt(context, query)
+    answer = generate_answer(cfg, prompt)
 
-    # 教学版：不集成在线 LLM，直接返回提示，实际调用由上层系统完成
     return {
         "prompt": prompt,
         "contexts": topk,
         "nodes": [],
-        "answer": "",  # 由上层 LLM 调用填写
+        "answer": answer,
     }
 
 

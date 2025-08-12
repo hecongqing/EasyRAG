@@ -37,8 +37,20 @@ rerank_topk: 6
 
 # 最终问答
 llm_name: "glm-4"
+llm_provider: "zhipu"  # vllm | ollama | openai | zhipu | local
+temperature: 0.2
 # 组装上下文的模板：按照文档编号 0..5
 final_context_topk: 6
+
+# vLLM OpenAI-compatible endpoint
+vllm:
+  base_url: "http://localhost:8000/v1"
+  model: "qwen2.5-7b-instruct"
+
+# Ollama OpenAI-compatible endpoint
+ollama:
+  base_url: "http://localhost:11434/v1"
+  model: "qwen2.5:7b-instruct-q5_1"
 
 # ES 设置（BM25 使用 ES/Kibana 教学）
 elasticsearch:
